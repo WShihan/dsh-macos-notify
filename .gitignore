@@ -1,0 +1,8 @@
+node_modules/
+*.tsbuildinfo
+.vite/
+.tmp/
+
+# lib/ is deliberately NOT ignored: the built Host bundle and browser bundle are
+# versioned, which is what lets `dsh plugin add github:WShihan/dsh-macos-notify`
+# install without any install-time build script or pnpm build allowance.

@@ -1,0 +1,12 @@
+# Layer installed by `dsh plugin add <this package>`: one plugin row, mounted
+# from the package name so the Loader resolves the built `lib/index.js` and the
+# client module system finds the package's `dsh.client` declaration.
+#
+# Every value below comes from the plugin's schema defaults; the settings page
+# (Settings → Plugins → Plugin configuration) or a later patch layer overrides
+# them. A later patch that overrides this row must restate the whole `config`
+# value, because a patch replaces the row's config rather than merging it.
+
+- insert:
+    - id: macos-notify
+      name: dsh-macos-notify
