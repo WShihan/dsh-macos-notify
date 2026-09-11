@@ -1,6 +1,6 @@
 # dsh-macos-notify
 
-[English](README.md) | 中文 | [GitHub](https://github.com/WShihan/dsh-macos-notify)
+[English](README.en.md) | 中文 | [GitHub](https://github.com/WShihan/dsh-macos-notify)
 
 源码、issue 与发布：<https://github.com/WShihan/dsh-macos-notify>。
 
