@@ -235,6 +235,3 @@ None. The plugin observes live agent events, sends nothing to the model, and reg
 
 It adds no model-visible content, so it neither grows nor invalidates the request prefix.
 
-## License
-
-MIT. Add your own `LICENSE` file when you publish this package under your name.
