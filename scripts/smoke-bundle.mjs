@@ -8,7 +8,7 @@
  *   node scripts/smoke-bundle.mjs
  *
  * It fails on a missing bundle, a wrong module id, a require the module table
- * cannot answer, or an `apply` that registers no settings card.
+ * cannot answer, or an `apply` that registers no settings section.
  */
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -65,18 +65,18 @@ const context = {
     register: (namespace) => { registrations.push(`locale:${namespace}`); return () => {} },
     bind: () => key => key,
   },
-  settingsScope: {
-    bind: (spec) => {
-      registrations.push(`scope:${spec.namespace}`)
+  configForms: {
+    get: (namespace) => {
+      registrations.push(`form:${namespace}`)
       return {
         getSnapshot: () => ({
           status: 'unavailable', value: undefined, base: undefined, user: undefined,
-          revision: undefined, writable: false, mode: 'memory',
+          revision: undefined, writable: false,
         }),
         subscribe: () => () => {},
-        set: async () => {},
-        unset: async () => {},
-        mutate: async () => {},
+        set: async () => false,
+        unset: async () => false,
+        mutate: async () => false,
       }
     },
   },

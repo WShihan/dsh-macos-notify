@@ -2,10 +2,15 @@
 # from the package name so the Loader resolves the built `lib/index.js` and the
 # client module system finds the package's `dsh.client` declaration.
 #
-# Every value below comes from the plugin's schema defaults; the settings page
-# (Settings → Plugins → Plugin configuration) or a later patch layer overrides
-# them. A later patch that overrides this row must restate the whole `config`
-# value, because a patch replaces the row's config rather than merging it.
+# Every value below comes from the plugin's schema defaults; the plugin's own
+# Notifications settings page writes them into the profile, and a later patch
+# layer overrides them. A later patch that overrides this row must restate the
+# whole `config` value, because a patch replaces the row's config rather than
+# merging it.
+#
+# The id is also the configuration form namespace: the browser half reads and
+# writes the entry by this id, so renaming it without updating
+# `SETTINGS_NAMESPACE` in src/settings.ts leaves the page without a form.
 
 - insert:
     - id: macos-notify

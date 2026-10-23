@@ -13,14 +13,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, resolveConfig, Service } from '@deepseek-ai/cordis'
+import { createVolatile, updateVolatile } from '@deepseek-ai/cosmokit'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { TurnEndReason } from '@deepseek-ai/dsh-session'
-import type { SettingsSectionHooks } from '@deepseek-ai/dsh-settings'
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import * as Notify from '../src/index.ts'
@@ -48,65 +48,37 @@ class RecordingSubprocess extends Service {
   }
 }
 
+/** One recorded settings mutation. */
+interface RecordedMutation {
+  readonly ns: string
+  readonly ops: readonly { readonly op: string; readonly path: readonly string[]; readonly value?: unknown }[]
+}
+
 /**
- * A `ctx.settings` stand-in: `installSection` records the consumer's hooks and
- * publishes the composition entry, exactly like the real service before any
- * user layer exists, so tests can drive a live settings change; `register`
- * backs the preview namespace with a value tests can fire.
+ * A `ctx.settings` stand-in: `configure` records the page policy, and `mutate`
+ * records the Host's clearing write for a fired preview.
  */
 class RecordingSettings extends Service {
-  static hooks: SettingsSectionHooks<Notify.Config> | undefined
-  static namespaces: string[] = []
-  static cleared: string[] = []
-  static previewValue: Record<string, unknown> = {
-    op: '', nonce: 0, sound: DEFAULT_SOUNDS.completed, title: '', message: '',
-  }
-  private static readonly previewWatchers = new Set<(next: Record<string, unknown>) => void>()
+  static configured: { auto?: boolean } | undefined
+  static mutations: RecordedMutation[] = []
 
-  /** Forget the previous test's scope, the way disposing its fiber would. */
   static reset(): void {
-    RecordingSettings.previewWatchers.clear()
+    RecordingSettings.configured = undefined
+    RecordingSettings.mutations = []
   }
 
   constructor(ctx: Context) {
     super(ctx, 'settings')
   }
 
-  installSection(
-    _owner: Context,
-    ns: string,
-    _schema: unknown,
-    entry: Notify.Config,
-    hooks: SettingsSectionHooks<Notify.Config>,
-  ): void {
-    RecordingSettings.hooks = hooks
-    RecordingSettings.namespaces.push(ns)
-    hooks.setSource(() => entry)
-    hooks.onChange()
+  configure(presentation: { auto?: boolean }): () => void {
+    RecordingSettings.configured = presentation
+    return () => {}
   }
 
-  register(ns: string): unknown {
-    RecordingSettings.namespaces.push(ns)
-    return {
-      get: () => RecordingSettings.previewValue,
-      watch: (callback: (next: Record<string, unknown>) => void) => {
-        RecordingSettings.previewWatchers.add(callback)
-        return () => { RecordingSettings.previewWatchers.delete(callback) }
-      },
-    }
-  }
-
-  /** Publish one preview request the way a settings commit would. */
-  static fire(next: Record<string, unknown>): void {
-    RecordingSettings.previewValue = { ...RecordingSettings.previewValue, ...next }
-    for (const watcher of [...RecordingSettings.previewWatchers]) watcher(RecordingSettings.previewValue)
-  }
-
-  /** The Host's clearing write: the real service commits the schema defaults. */
-  replace(ns: string): Promise<void> {
-    RecordingSettings.cleared.push(ns)
-    RecordingSettings.previewValue = { op: '', nonce: 0, sound: DEFAULT_SOUNDS.completed, title: '', message: '' }
-    return Promise.resolve()
+  mutate(ns: string, ops: RecordedMutation['ops']): Promise<boolean> {
+    RecordingSettings.mutations.push({ ns, ops })
+    return Promise.resolve(true)
   }
 }
 
@@ -120,26 +92,66 @@ function agentOf(session: Session): Agent {
   return { session } as unknown as Agent
 }
 
-async function setup(config: Notify.Config = {}, mount: boolean = true): Promise<Context> {
+/**
+ * Resolve one composition entry into runtime references exactly as Cordis
+ * does, so a test can commit a later value through `updateVolatile`.
+ * @param input - plain fields from `cordis.yml`.
+ * @returns the volatile configuration references.
+ */
+function configOf(input: Notify.ConfigInput = {}): Notify.Config {
+  return resolveConfig(
+    { Config: Notify.Config } as unknown as Parameters<typeof resolveConfig>[0],
+    input,
+  ) as Notify.Config
+}
+
+/** Mount the plugin over already-resolved configuration references. */
+function mountConfig(ctx: Context, config: Notify.Config) {
+  return ctx.plugin({
+    name: Notify.name,
+    inject: Notify.inject,
+    apply: (owned: Context) => { Notify.apply(owned, config) },
+  })
+}
+
+/** Configuration references of the most recently created test context. */
+let current: Notify.Config
+
+async function createContext(input: Notify.ConfigInput = {}): Promise<Context> {
   vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
   const ctx = new Context()
   await ctx.plugin(RecordingSubprocess)
   await ctx.plugin(SessionStore)
   await ctx.plugin(ApprovalService)
   await ctx.plugin(RecordingSettings)
-  if (mount) await ctx.plugin(Notify, config)
+  current = configOf(input)
   return ctx
+}
+
+async function setup(input: Notify.ConfigInput = {}, mount: boolean = true): Promise<Context> {
+  const ctx = await createContext(input)
+  if (mount) await mountConfig(ctx, current)
+  return ctx
+}
+
+/** Publish a settings write the way the Loader's volatile commit does. */
+function commitVolatile(field: 'sounds' | 'messages' | 'preview', value: unknown): void {
+  if (field === 'sounds') updateVolatile(current.sounds as never, createVolatile(value))
+  else if (field === 'messages') updateVolatile(current.messages as never, createVolatile(value))
+  else updateVolatile(current.preview as never, createVolatile(value))
+}
+
+/** Write one preview request and emit the Loader's volatile commit. */
+function firePreview(ctx: Context, request: Partial<Notify.PreviewRequest>): void {
+  commitVolatile('preview', {
+    op: '', nonce: 0, sound: '', title: '', message: '', ...request,
+  })
+  ctx.emit('loader/volatile-update', [['preview']])
 }
 
 beforeEach(() => {
   RecordingSubprocess.specs.length = 0
-  RecordingSettings.hooks = undefined
-  RecordingSettings.namespaces.length = 0
-  RecordingSettings.cleared.length = 0
   RecordingSettings.reset()
-  RecordingSettings.previewValue = {
-    op: '', nonce: 0, sound: DEFAULT_SOUNDS.completed, title: '', message: '',
-  }
 })
 
 afterEach(() => {
@@ -226,13 +238,21 @@ describe('macos-notify platform guard', () => {
     const ctx = new Context()
     // apply() directly: ctx.plugin() waits on the injected subprocess service,
     // so a bare context never reaches the platform guard through the loader.
-    expect(() => Notify.apply(ctx, {})).toThrow(/requires macOS/)
+    expect(() => Notify.apply(ctx, configOf({}))).toThrow(/requires macOS/)
   })
 
-  it('fails loud at load on an unknown configured sound', async () => {
+  it('rejects an unknown configured sound when the schema resolves the entry', async () => {
+    expect(() => configOf({ sounds: { approval: 'Kazoo' } })).toThrow()
+  })
+
+  it('fails loud at load on a hand-built configuration with an unknown sound', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const ctx = new Context()
-    expect(() => Notify.apply(ctx, { sounds: { approval: 'Kazoo' } })).toThrow(/sounds\.approval/)
+    const config = {
+      ...configOf({}),
+      sounds: createVolatile({ approval: 'Kazoo' }),
+    } as unknown as Notify.Config
+    expect(() => Notify.apply(ctx, config)).toThrow(/sounds\.approval/)
   })
 })
 
@@ -445,25 +465,10 @@ describe('macos-notify approval banners', () => {
   })
 })
 
-describe('macos-notify settings namespace', () => {
-  it('registers the settings and preview namespaces', async () => {
+describe('macos-notify settings integration', () => {
+  it('turns the automatic page off so the shipped page owns the entry', async () => {
     await setup()
-    expect(RecordingSettings.namespaces).toEqual(['macos-notify', 'macos-notify-preview'])
-  })
-
-  it('refuses a settings write that names an unknown sound', async () => {
-    await setup()
-    expect(() => RecordingSettings.hooks?.validate?.({ sounds: { completed: 'Kazoo' } }))
-      .toThrow(/sounds\.completed/)
-    expect(() => RecordingSettings.hooks?.validate?.({ sounds: { completed: 'Ping' } })).not.toThrow()
-  })
-
-  it('accepts a text write and refuses a non-string one', async () => {
-    await setup()
-    expect(() => RecordingSettings.hooks?.validate?.({ messages: { error: { message: 'ok' } } })).not.toThrow()
-    expect(() => RecordingSettings.hooks?.validate?.({
-      messages: { error: { title: 7 as unknown as string } },
-    })).toThrow(/messages\.error\.title/)
+    expect(RecordingSettings.configured).toEqual({ auto: false })
   })
 
   it('applies a settings change to the next banner without a reload', async () => {
@@ -472,10 +477,9 @@ describe('macos-notify settings namespace', () => {
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     expect(lastScript()).toContain('sound name "Glass"')
 
-    RecordingSettings.hooks?.setSource(() => ({
-      sounds: { completed: 'Submarine' },
-      messages: { completed: { title: '改了', message: '改过的内容 {turn}' } },
-    }))
+    commitVolatile('sounds', { completed: 'Submarine' })
+    commitVolatile('messages', { completed: { title: '改了', message: '改过的内容 {turn}' } })
+    ctx.emit('loader/volatile-update', [['sounds'], ['messages']])
     session.append('turn/start', { turn: 2 })
     session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
     expect(lastScript()).toBe('display notification "改过的内容 2" with title "改了" sound name "Submarine"')
@@ -484,54 +488,62 @@ describe('macos-notify settings namespace', () => {
 
 describe('macos-notify preview requests', () => {
   it('fires the requested banner and clears the request', async () => {
-    await setup()
-    RecordingSettings.fire({
+    const ctx = await createContext()
+    const fiber = await mountConfig(ctx, current)
+    // The Host reaches the page's request through its own Loader entry id.
+    Object.defineProperty(fiber, 'entry', {
+      configurable: true,
+      value: { options: { id: 'macos-notify' } },
+    })
+    firePreview(ctx, {
       op: 'error', nonce: 1, sound: 'Hero', title: '任务失败', message: '第 1 轮失败：boom',
     })
 
     expect(RecordingSubprocess.specs).toHaveLength(1)
     expect(lastScript()).toBe('display notification "第 1 轮失败：boom" with title "任务失败" sound name "Hero"')
-    expect(RecordingSettings.cleared).toEqual(['macos-notify-preview'])
+    expect(RecordingSettings.mutations).toEqual([{
+      ns: 'macos-notify',
+      ops: [{ op: 'unset', path: ['preview'] }],
+    }])
   })
 
   it('ignores a repeat of the request it already fired', async () => {
-    await setup()
-    RecordingSettings.fire({ op: 'completed', nonce: 1, sound: 'Glass', title: 'T', message: 'M' })
-    RecordingSettings.fire({ op: 'completed', nonce: 1, sound: 'Glass', title: 'T', message: 'M' })
+    const ctx = await setup()
+    firePreview(ctx, { op: 'completed', nonce: 1, sound: 'Glass', title: 'T', message: 'M' })
+    firePreview(ctx, { op: 'completed', nonce: 1, sound: 'Glass', title: 'T', message: 'M' })
 
     expect(RecordingSubprocess.specs).toHaveLength(1)
   })
 
   it('fires each new request once', async () => {
-    await setup()
-    RecordingSettings.fire({ op: 'completed', nonce: 1, sound: 'Glass', title: 'a', message: 'a' })
-    RecordingSettings.fire({ op: 'completed', nonce: 2, sound: 'Tink', title: 'b', message: 'b' })
+    const ctx = await setup()
+    firePreview(ctx, { op: 'completed', nonce: 1, sound: 'Glass', title: 'a', message: 'a' })
+    firePreview(ctx, { op: 'completed', nonce: 2, sound: 'Tink', title: 'b', message: 'b' })
 
     expect(RecordingSubprocess.specs).toHaveLength(2)
     expect(lastScript()).toBe('display notification "b" with title "b" sound name "Tink"')
   })
 
   it('ignores a request that names no operation', async () => {
-    await setup()
-    RecordingSettings.fire({ op: 'nope', nonce: 1, sound: 'Glass', title: 'T', message: 'M' })
+    const ctx = await setup()
+    firePreview(ctx, { op: 'nope', nonce: 1, sound: 'Glass', title: 'T', message: 'M' })
     expect(RecordingSubprocess.specs).toHaveLength(0)
   })
 
   it('falls back to the operation default for an unknown requested sound', async () => {
-    await setup()
-    RecordingSettings.fire({ op: 'approval', nonce: 1, sound: 'Kazoo', title: 'T', message: 'M' })
+    const ctx = await setup()
+    firePreview(ctx, { op: 'approval', nonce: 1, sound: 'Kazoo', title: 'T', message: 'M' })
     expect(lastScript()).toBe('display notification "M" with title "T" sound name "Ping"')
   })
 
   it('does not fire a request left over from an earlier run', async () => {
-    RecordingSettings.previewValue = {
-      op: 'completed', nonce: 7, sound: 'Glass', title: 'stale', message: 'stale',
-    }
-    await setup()
-    RecordingSettings.fire({ op: 'completed', nonce: 7, sound: 'Glass', title: 'stale', message: 'stale' })
+    const ctx = await setup({
+      preview: { op: 'completed', nonce: 7, sound: 'Glass', title: 'stale', message: 'stale' },
+    })
+    firePreview(ctx, { op: 'completed', nonce: 7, sound: 'Glass', title: 'stale', message: 'stale' })
     expect(RecordingSubprocess.specs).toHaveLength(0)
 
-    RecordingSettings.fire({ op: 'completed', nonce: 8, sound: 'Glass', title: 'fresh', message: 'fresh' })
+    firePreview(ctx, { op: 'completed', nonce: 8, sound: 'Glass', title: 'fresh', message: 'fresh' })
     expect(RecordingSubprocess.specs).toHaveLength(1)
   })
 })

@@ -1,21 +1,21 @@
 /**
- * The notification settings page's model over the `macos-notify` settings
- * namespace.
+ * The notification settings page's model over the plugin's own configuration
+ * entry (the `macos-notify` profile entry).
  *
  * Sounds and toggles commit as the user picks them: a select has no free-text
- * state to stage, and the settings scope already serializes writes and fences
- * them by revision. Text is staged instead — one banner body is typed
- * character by character, and a settings write is a durable document
+ * state to stage, and the shared configuration form already serializes writes
+ * and fences them by revision. Text is staged instead — one banner body is
+ * typed character by character, and a settings write is a durable document
  * mutation, so committing per keystroke would store edits the user never
  * asked for. The staged text is written by one `mutate` when the user saves.
  *
  * The controller publishes one immutable snapshot for the page and keeps the
  * reference stable while nothing the page renders has moved, so an unrelated
- * settings commit does not re-render it.
+ * configuration commit does not re-render it.
  * @module dsh-macos-notify/client/notifications-controller
  */
 
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   DEFAULT_MESSAGES, DEFAULT_SOUNDS, SOUND_KEYS, isSoundName, renderTemplate,
   type NotifySettings, type PreviewRequest, type SoundKey, type SoundName,
@@ -193,20 +193,17 @@ export class NotificationsController {
   private pending = 0
   private failed = false
   private testing: SoundKey | undefined
-  /** Request id for the preview namespace; every click writes a new one. */
+  /** Request id for the configuration's preview field; every click writes a new one. */
   private nonce = Date.now()
   private disposed = false
 
   /**
-   * @param scope - the bound settings scope for the `macos-notify` namespace.
-   * @param preview - the bound settings scope for the preview namespace the
-   * Host watches.
+   * @param scope - the shared configuration form of the `macos-notify` entry.
    * @param samples - placeholder samples a preview substitutes, read at click
    * time so a locale change reaches the next preview.
    */
   constructor(
-    private readonly scope: SettingsScope<NotifySettings>,
-    private readonly preview: SettingsScope<PreviewRequest>,
+    private readonly scope: ConfigForm<NotifySettings>,
     private readonly samples: () => PreviewSamples,
   ) {
     this.unsubscribe = scope.subscribe(() => { this.publish() })
@@ -317,13 +314,7 @@ export class NotificationsController {
     }
     this.testing = key
     this.run(
-      () => this.preview.mutate([
-        { op: 'set', path: ['op'], value: request.op },
-        { op: 'set', path: ['nonce'], value: request.nonce },
-        { op: 'set', path: ['sound'], value: request.sound },
-        { op: 'set', path: ['title'], value: request.title },
-        { op: 'set', path: ['message'], value: request.message },
-      ]),
+      () => this.scope.set('preview', request),
       { onSettle: () => { this.testing = undefined } },
     )
   }
@@ -377,21 +368,30 @@ export class NotificationsController {
 
   /**
    * Run one settings write, publishing the in-flight and settled states. A
-   * refusal is reported on the page; the settings mirror is what corrects the
-   * rendered values afterwards.
-   * @param write - the queued scope write.
+   * refusal is reported on the page; the configuration mirror is what
+   * corrects the rendered values afterwards.
+   * @param write - the queued configuration write.
    * @param hooks - staged state to settle once the write lands, optimistic
    * state to drop when it does not, and in-flight state to clear either way.
    */
   private run(
-    write: () => Promise<void>,
+    write: () => Promise<boolean>,
     hooks: { onSuccess?: () => void; onFailure?: () => void; onSettle?: () => void } = {},
   ): void {
     this.failed = false
     this.pending += 1
     this.publish()
     void write().then(
-      () => { hooks.onSuccess?.(); hooks.onSettle?.(); this.settle() },
+      (accepted) => {
+        if (!accepted) {
+          this.failed = true
+          hooks.onFailure?.()
+        } else {
+          hooks.onSuccess?.()
+        }
+        hooks.onSettle?.()
+        this.settle()
+      },
       () => { this.failed = true; hooks.onFailure?.(); hooks.onSettle?.(); this.settle() },
     )
   }

@@ -1,16 +1,16 @@
 /**
- * Controller coverage for the Notifications settings page. The settings scope
- * is a recording stub: what the page renders and which path operations it
- * writes are this package's contract with the settings service.
+ * Controller coverage for the Notifications settings page. The shared
+ * configuration form is a recording stub: what the page renders and which path
+ * operations it writes are this package's contract with the settings service.
  */
 
 import { describe, expect, it } from 'vitest'
-import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   NotificationsController, type PreviewSamples,
 } from '../src/client/notifications-controller.ts'
 import {
-  DEFAULT_MESSAGES, DEFAULT_SOUNDS, type NotifySettings, type PreviewRequest,
+  DEFAULT_MESSAGES, DEFAULT_SOUNDS, type NotifySettings,
 } from '../src/settings.ts'
 
 /** Deterministic placeholder samples a preview substitutes. */
@@ -31,14 +31,14 @@ interface Write {
   readonly value?: unknown
 }
 
-/** The smallest settings scope the controller consumes. */
-class FakeScope {
+/** The smallest configuration form the controller consumes. */
+class FakeForm {
   readonly writes: Write[] = []
   failWrites = false
   private listeners = new Set<() => void>()
-  private snapshot: SettingsScopeSnapshot<NotifySettings>
+  private snapshot: ConfigFormSnapshot<NotifySettings>
 
-  constructor(init: Partial<SettingsScopeSnapshot<NotifySettings>> = {}) {
+  constructor(init: Partial<ConfigFormSnapshot<NotifySettings>> = {}) {
     this.snapshot = {
       status: 'loading',
       value: undefined,
@@ -46,12 +46,11 @@ class FakeScope {
       user: undefined,
       revision: undefined,
       writable: false,
-      mode: 'host',
       ...init,
     }
   }
 
-  getSnapshot(): SettingsScopeSnapshot<NotifySettings> {
+  getSnapshot(): ConfigFormSnapshot<NotifySettings> {
     return this.snapshot
   }
 
@@ -60,39 +59,37 @@ class FakeScope {
     return () => { this.listeners.delete(listener) }
   }
 
-  mutate(ops: readonly Write[]): Promise<void> {
+  mutate(ops: readonly Write[]): Promise<boolean> {
+    if (this.failWrites) return Promise.resolve(false)
     this.writes.push(...ops.map(op => ({ ...op })))
-    if (this.failWrites) return Promise.reject(new Error('refused'))
-    return Promise.resolve()
+    return Promise.resolve(true)
   }
 
-  set(field: string, value: unknown): Promise<void> {
+  set(field: string, value: unknown): Promise<boolean> {
     return this.mutate([{ op: 'set', path: [field], value }])
   }
 
-  unset(field: string): Promise<void> {
+  unset(field: string): Promise<boolean> {
     return this.mutate([{ op: 'unset', path: [field] }])
   }
 
-  publish(next: Partial<SettingsScopeSnapshot<NotifySettings>> = {}): void {
+  publish(next: Partial<ConfigFormSnapshot<NotifySettings>> = {}): void {
     this.snapshot = { ...this.snapshot, ...next }
     for (const listener of [...this.listeners]) listener()
   }
 }
 
-function controllerOf(scope: FakeScope, preview: FakeScope = new FakeScope()): NotificationsController {
+function controllerOf(scope: FakeForm): NotificationsController {
   return new NotificationsController(
-    scope as unknown as SettingsScope<NotifySettings>,
-    preview as unknown as SettingsScope<PreviewRequest>,
+    scope as unknown as ConfigForm<NotifySettings>,
     () => SAMPLES,
   )
 }
 
-/** The `set` operations of one preview request, keyed by field. */
-function previewPayload(scope: FakeScope): Record<string, unknown> {
-  const payload: Record<string, unknown> = {}
-  for (const write of scope.writes) payload[write.path.join('.')] = write.value
-  return payload
+/** The preview request the controller wrote, if any. */
+function previewPayload(scope: FakeForm): Record<string, unknown> {
+  const write = [...scope.writes].reverse().find(candidate => candidate.path.join('.') === 'preview')
+  return (write?.value ?? {}) as Record<string, unknown>
 }
 
 /** Let the controller's queued write settle. */
@@ -103,14 +100,14 @@ async function settle(): Promise<void> {
 
 describe('macos-notify notifications page controller', () => {
   it('renders nothing until the Host answers', () => {
-    const state = controllerOf(new FakeScope()).inject().hooks.notifications.getSnapshot()
+    const state = controllerOf(new FakeForm()).inject().hooks.notifications.getSnapshot()
     expect(state.available).toBe(false)
     expect(state.operations.completed.sound).toBe(DEFAULT_SOUNDS.completed)
     expect(state.operations.completed.title.draft).toBe(DEFAULT_MESSAGES.completed.title)
   })
 
   it('publishes the resolved section once it is ready', () => {
-    const scope = new FakeScope({
+    const scope = new FakeForm({
       status: 'ready',
       writable: true,
       value: {
@@ -133,7 +130,7 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('marks a field overridden from the raw user layer, not from its value', () => {
-    const scope = new FakeScope({
+    const scope = new FakeForm({
       status: 'ready',
       writable: true,
       value: { sounds: { completed: DEFAULT_SOUNDS.completed }, messages: { completed: { title: DEFAULT_MESSAGES.completed.title } } },
@@ -148,21 +145,21 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('writes one nested sound path per change', async () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     controllerOf(scope).inject().setSound('approval', 'Submarine')
     await settle()
     expect(scope.writes).toEqual([{ op: 'set', path: ['sounds', 'approval'], value: 'Submarine' }])
   })
 
   it('writes a boolean toggle as its own top-level field', async () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     controllerOf(scope).inject().setToggle('topLevelOnly', false)
     await settle()
     expect(scope.writes).toEqual([{ op: 'set', path: ['topLevelOnly'], value: false }])
   })
 
   it('stages text, saves it in one mutation, and clears the stage', async () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     const face = controllerOf(scope).inject()
     expect(face.hooks.notifications.getSnapshot().dirty).toBe(false)
 
@@ -183,7 +180,7 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('un-stages text typed back to the stored value', () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     const face = controllerOf(scope).inject()
     face.editText('blocked', 'title', 'changed')
     expect(face.hooks.notifications.getSnapshot().dirty).toBe(true)
@@ -193,7 +190,7 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('keeps a staged draft across an unrelated settings commit', () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     const face = controllerOf(scope).inject()
     face.editText('error', 'message', 'boom: {error}')
     scope.publish({ revision: 9 })
@@ -204,7 +201,7 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('discards staged text without writing', () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     const face = controllerOf(scope).inject()
     face.editText('error', 'message', 'boom')
     face.discard()
@@ -214,7 +211,7 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('resets all three fields of one operation', async () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     const face = controllerOf(scope).inject()
     face.editText('approval', 'title', 'staged')
     face.resetOperation('approval')
@@ -229,7 +226,7 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('reports a refused write and clears the report on the next edit', async () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     scope.failWrites = true
     const face = controllerOf(scope).inject()
     face.setSound('completed', 'Pop')
@@ -243,7 +240,7 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('keeps a refused text write staged for correction', async () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     scope.failWrites = true
     const face = controllerOf(scope).inject()
     face.editText('error', 'message', 'rejected text')
@@ -257,35 +254,33 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('writes a preview request with the placeholder samples substituted', async () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
-    const preview = new FakeScope({ status: 'ready', writable: true, value: {} })
-    const state = controllerOf(scope, preview).inject()
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
+    const state = controllerOf(scope).inject()
     state.test('approval')
 
     expect(state.hooks.notifications.getSnapshot().testing).toBe('approval')
     await settle()
     expect(state.hooks.notifications.getSnapshot().testing).toBeUndefined()
-    expect(previewPayload(preview)).toEqual({
+    expect(previewPayload(scope)).toEqual({
       op: 'approval',
       nonce: expect.any(Number),
       sound: DEFAULT_SOUNDS.approval,
       title: DEFAULT_MESSAGES.approval.title,
       message: 'shell needs run a command',
     })
-    expect(previewPayload(preview)['nonce']).toBeGreaterThan(0)
+    expect(previewPayload(scope)['nonce']).toBeGreaterThan(0)
   })
 
   it('previews the staged text, not what is stored', async () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
-    const preview = new FakeScope({ status: 'ready', writable: true, value: {} })
-    const face = controllerOf(scope, preview).inject()
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
+    const face = controllerOf(scope).inject()
     face.editText('error', 'title', '出错了')
     face.editText('error', 'message', '第 {turn} 轮：{error}')
     face.setSound('error', 'Submarine')
     face.test('error')
     await settle()
 
-    expect(previewPayload(preview)).toEqual({
+    expect(previewPayload(scope)).toEqual({
       op: 'error',
       nonce: expect.any(Number),
       sound: 'Submarine',
@@ -297,22 +292,21 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('sends a distinct request id per preview', async () => {
-    const preview = new FakeScope({ status: 'ready', writable: true, value: {} })
-    const face = controllerOf(new FakeScope({ status: 'ready', writable: true, value: {} }), preview).inject()
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
+    const face = controllerOf(scope).inject()
     face.test('completed')
     await settle()
-    const first = previewPayload(preview)['nonce'] as number
-    preview.writes.length = 0
+    const first = previewPayload(scope)['nonce'] as number
+    scope.writes.length = 0
     face.test('completed')
     await settle()
-    expect(previewPayload(preview)['nonce']).toBeGreaterThan(first)
+    expect(previewPayload(scope)['nonce']).toBeGreaterThan(first)
   })
 
   it('reports a refused preview and stops showing it as in flight', async () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
-    const preview = new FakeScope({ status: 'ready', writable: true, value: {} })
-    preview.failWrites = true
-    const face = controllerOf(scope, preview).inject()
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
+    scope.failWrites = true
+    const face = controllerOf(scope).inject()
     face.test('completed')
     await settle()
 
@@ -322,7 +316,7 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('keeps the published snapshot reference while nothing it renders moves', () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     const store = controllerOf(scope).inject().hooks.notifications
     const before = store.getSnapshot()
     scope.publish({ revision: 7 })
@@ -330,7 +324,7 @@ describe('macos-notify notifications page controller', () => {
   })
 
   it('stops publishing after disposal', () => {
-    const scope = new FakeScope({ status: 'ready', writable: true, value: {} })
+    const scope = new FakeForm({ status: 'ready', writable: true, value: {} })
     const controller = controllerOf(scope)
     const store = controller.inject().hooks.notifications
     const before = store.getSnapshot()

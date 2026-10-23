@@ -1,25 +1,26 @@
 /**
  * macOS notification plugin, browser half: the **Notifications** settings page
- * over the `macos-notify` namespace.
+ * over the plugin's own configuration entry.
  *
  * The page is a feature-owned `settings.section`, so it appears as its own row
  * in the settings navigation beside General, Models, Plugins, and Agent
- * presets. Owning a section is also why no `settings.plugin.item` card is
- * contributed: a namespace that has its own page stays out of the Plugins
- * section's Plugin configuration tab.
+ * presets. The page edits the `macos-notify` profile entry through the shared
+ * `ctx.configForms` service: the same revision-fenced, schema-validated write
+ * path every official settings page uses, and because the Host declares every
+ * field volatile the running plugin keeps its listeners and applies the change
+ * to the next banner.
  * @module dsh-macos-notify/client
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: the ctx.settingsScope Context merge and the 'settings.section'
-// slot declaration, so the page reads and writes through services instead of
-// value imports (client bundle purity).
+// Type-only: the ctx.configForms Context merge, so the page reads and writes
+// through the service instead of value imports (client bundle purity).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: the SlotRegistry service merge (ctx.slots).
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-import { PREVIEW_NAMESPACE, SETTINGS_NAMESPACE } from '../settings.ts'
+import { SETTINGS_NAMESPACE, type NotifySettings } from '../settings.ts'
 import { NotificationsSection } from './NotificationsSection.tsx'
 import { NotificationsController, type PreviewSamples } from './notifications-controller.ts'
 import { LOCALE_NAMESPACE, en, zh } from './locales.ts'
@@ -42,7 +43,7 @@ export const SECTION_ID = 'notifications'
 export const SECTION_ORDER = 25
 
 /** Required services (cordis fiber inject). */
-export const inject = ['slots', 'locale', 'settingsScope']
+export const inject = ['slots', 'locale', 'configForms']
 
 /**
  * Register the page's dictionary and its `settings.section` contribution.
@@ -69,8 +70,7 @@ export function apply(ctx: ClientContext): void {
   })
 
   const controller = new NotificationsController(
-    ctx.settingsScope.bind({ namespace: SETTINGS_NAMESPACE }),
-    ctx.settingsScope.bind({ namespace: PREVIEW_NAMESPACE }),
+    ctx.configForms.get<NotifySettings>(SETTINGS_NAMESPACE),
     samples,
   )
   ctx.effect(() => () => { controller.dispose() }, 'macos-notify: page snapshot')

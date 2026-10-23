@@ -6,31 +6,35 @@
  * model transcript or the session log.
  *
  * Each banner-producing operation carries its own sound and its own text. Both
- * live in the `macos-notify` settings namespace, so the shipped web settings
- * page can change them at runtime without a restart and without a `cordis.yml`
- * edit; without a settings provider the composition entry is the only source.
+ * live in this plugin's Cordis Config as volatile fields, so the shipped web
+ * settings page edits them through the profile's configuration form and a
+ * change applies to the next banner without a remount; without a settings
+ * service the composition entry is the only source.
  *
  * The plugin is macOS-only by contract: mounting it on another platform fails
  * loud at load instead of silently dropping notifications.
  * @module dsh-macos-notify
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+// Type-only: the Loader's `loader/volatile-update` event and `ctx.fiber.entry`.
+import type {} from '@deepseek-ai/cordis-plugin-loader'
+// Type-only: the `ctx.settings` service that persists `configure()`.
+import type {} from '@deepseek-ai/dsh-settings'
 import type { Session, SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type { SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import type { ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import {
-  DEFAULT_MESSAGES, DEFAULT_SOUNDS, PREVIEW_NAMESPACE, SETTINGS_NAMESPACE, SOUND_KEYS, SOUND_NAMES,
+  DEFAULT_MESSAGES, DEFAULT_SOUNDS, SOUND_KEYS, SOUND_NAMES,
   isSoundKey, isSoundName, renderTemplate,
   type MessagesSettings, type NotifySettings, type PreviewRequest, type ResolvedMessage,
-  type ResolvedNotifySettings, type SoundKey, type SoundName,
+  type ResolvedNotifySettings, type SoundKey, type SoundName, type SoundsSettings,
 } from './settings.ts'
 import { notificationScript, type Notice } from './script.ts'
 
 export {
-  DEFAULT_MESSAGES, DEFAULT_SOUNDS, PLACEHOLDERS, PREVIEW_NAMESPACE, SETTINGS_NAMESPACE, SOUND_KEYS,
+  DEFAULT_MESSAGES, DEFAULT_SOUNDS, PLACEHOLDERS, SETTINGS_NAMESPACE, SOUND_KEYS,
   SOUND_NAMES, SYSTEM_SOUNDS, isSoundKey, isSoundName, renderTemplate,
 } from './settings.ts'
 export type {
@@ -46,22 +50,56 @@ export const name = 'macos-notify'
 /** The managed process-tree service this plugin spawns `osascript` through. */
 export const inject = ['subprocess']
 
-/** Composition entry of the `macos-notify` settings namespace. */
-export interface Config extends NotifySettings {}
+/**
+ * Composition entry as written in `cordis.yml`: every field optional, because
+ * the schema supplies the default the settings form then edits.
+ */
+export interface ConfigInput extends NotifySettings {
+  /** Transient banner preview request the settings page writes. */
+  preview?: PreviewRequest
+}
 
-export const Config: z<Config> = z.object({
-  notifyOnTurnEnd: z.boolean().default(true),
-  notifyOnApproval: z.boolean().default(true),
-  topLevelOnly: z.boolean().default(true),
+/**
+ * Runtime configuration. Every field is a stable volatile reference: the
+ * Loader commits a settings write into these references and notifies the
+ * owning fiber, so a change applies to the next banner without a remount.
+ */
+export interface Config {
+  notifyOnTurnEnd: Volatile<boolean>
+  notifyOnApproval: Volatile<boolean>
+  topLevelOnly: Volatile<boolean>
+  sounds: Volatile<SoundsSettings>
+  messages: Volatile<MessagesSettings>
+  preview: Volatile<PreviewRequest>
+}
+
+/**
+ * Form value that means "no preview is pending". Every field is defaulted so
+ * clearing the request resolves back to this value without the page writing
+ * an empty object.
+ */
+const NO_PREVIEW: PreviewRequest = Object.freeze({
+  op: '', nonce: 0, sound: '', title: '', message: '',
+})
+
+/**
+ * Schema of the plugin's live configuration. Every top-level field is
+ * volatile: ordinary fields would remount the plugin on an edit, dispose its
+ * listeners, and drop a banner that is already crossing the subprocess seam.
+ */
+export const Config = z.object({
+  notifyOnTurnEnd: z.boolean().default(true).volatile(),
+  notifyOnApproval: z.boolean().default(true).volatile(),
+  topLevelOnly: z.boolean().default(true).volatile(),
   sounds: z.object({
-    completed: z.string().default(DEFAULT_SOUNDS.completed),
-    blocked: z.string().default(DEFAULT_SOUNDS.blocked),
-    aborted: z.string().default(DEFAULT_SOUNDS.aborted),
-    error: z.string().default(DEFAULT_SOUNDS.error),
-    maxTokens: z.string().default(DEFAULT_SOUNDS.maxTokens),
-    interrupted: z.string().default(DEFAULT_SOUNDS.interrupted),
-    approval: z.string().default(DEFAULT_SOUNDS.approval),
-  }),
+    completed: z.union(SOUND_NAMES).default(DEFAULT_SOUNDS.completed),
+    blocked: z.union(SOUND_NAMES).default(DEFAULT_SOUNDS.blocked),
+    aborted: z.union(SOUND_NAMES).default(DEFAULT_SOUNDS.aborted),
+    error: z.union(SOUND_NAMES).default(DEFAULT_SOUNDS.error),
+    maxTokens: z.union(SOUND_NAMES).default(DEFAULT_SOUNDS.maxTokens),
+    interrupted: z.union(SOUND_NAMES).default(DEFAULT_SOUNDS.interrupted),
+    approval: z.union(SOUND_NAMES).default(DEFAULT_SOUNDS.approval),
+  }).default({ ...DEFAULT_SOUNDS }).volatile(),
   messages: z.object({
     completed: messageSchema('completed'),
     blocked: messageSchema('blocked'),
@@ -70,21 +108,20 @@ export const Config: z<Config> = z.object({
     maxTokens: messageSchema('maxTokens'),
     interrupted: messageSchema('interrupted'),
     approval: messageSchema('approval'),
-  }),
-})
-
-/**
- * Schema of the preview namespace. Every field is defaulted, so a cleared
- * request resolves back to "no request" without the page writing an empty
- * object.
- */
-export const PreviewConfig: z<PreviewRequest> = z.object({
-  op: z.string().default(''),
-  nonce: z.number().default(0),
-  sound: z.string().default(DEFAULT_SOUNDS.completed),
-  title: z.string().default(''),
-  message: z.string().default(''),
-})
+  }).default({ ...DEFAULT_MESSAGES }).volatile(),
+  // Plumbing, not configuration: the settings page writes one request here,
+  // the Host fires that banner and clears the request again. Keeping it in the
+  // plugin's own entry is the only Host channel a package outside the web
+  // assembly's generated Remote namespaces has. The custom page suppresses the
+  // automatic form, so this field is never rendered as a control.
+  preview: z.object({
+    op: z.string().default(''),
+    nonce: z.number().default(0),
+    sound: z.string().default(''),
+    title: z.string().default(''),
+    message: z.string().default(''),
+  }).default(NO_PREVIEW).hidden().volatile(),
+}) as z<ConfigInput, Config>
 
 /**
  * Schema for one operation's banner text, defaulted from
@@ -109,9 +146,9 @@ const MAX_MESSAGE_CHARS = 160
 
 /**
  * Fill schema defaults and validate every configured sound and template.
- * Called on the composition entry at load and on every settings write, so an
- * unknown sound name or a non-string template fails loud instead of producing
- * a wrong banner.
+ * Called on the composition entry at load and on every banner, so an unknown
+ * sound name or a non-string template fails loud instead of producing a wrong
+ * banner; schema-validated settings writes re-run it through the same path.
  * @param config - composition entry or resolved settings section.
  * @returns the section with defaults filled, sounds narrowed to {@link SoundName}.
  * @throws {Error} when a configured sound or template value is invalid.
@@ -214,7 +251,7 @@ export function turnEndValues(reason: TurnEndReason, turn: number): Record<strin
  * @param req - the pending approval decision being dispatched.
  * @returns the value table for template substitution.
  */
-export function approvalValues(req: ApprovalRequest): Record<string, string> {
+export function approvalValues(req: ApprovalRequestEvent): Record<string, string> {
   return {
     tool: req.toolName,
     reason: req.reason === undefined ? 'approval' : truncate(req.reason),
@@ -270,15 +307,32 @@ export function notify(ctx: Context, sound: SoundName, notice: Notice): void {
 }
 
 /**
- * Register the notification listeners and the settings namespace. Each
+ * Read the runtime configuration into the plain shape the banner code
+ * resolves. Reads happen at event time and the snapshots are never retained,
+ * so a settings write lands on the next banner.
+ * @param config - the plugin's live configuration references.
+ * @returns the current plain settings section.
+ */
+function settingsOf(config: Config): NotifySettings {
+  return {
+    notifyOnTurnEnd: config.notifyOnTurnEnd.get(),
+    notifyOnApproval: config.notifyOnApproval.get(),
+    topLevelOnly: config.topLevelOnly.get(),
+    sounds: config.sounds.get(),
+    messages: config.messages.get(),
+  }
+}
+
+/**
+ * Register the notification listeners and the settings page policy. Each
  * listener observes without answering or changing anything: the
  * `session/event` observer only reads the `turn/end` reason, and the
  * `approval/request` waterfall listener always delegates with `next()` so it
- * never claims a decision. Every listener resolves the settings source at
+ * never claims a decision. Every listener reads the volatile references at
  * event time, so a sound or text changed on the settings page applies to the
  * next banner without a reload.
  * @param ctx - the plugin context.
- * @param config - the composition entry for the `macos-notify` namespace.
+ * @param config - the plugin's live configuration references.
  * @throws {Error} when the host is not macOS or the entry config is invalid.
  */
 export function apply(ctx: Context, config: Config): void {
@@ -288,24 +342,11 @@ export function apply(ctx: Context, config: Config): void {
       + `are unavailable on "${process.platform}"`,
     )
   }
-  resolveSettings(config)
-
-  // The composition entry is the source until a settings provider attaches;
-  // `installSection` swaps in the resolved scope and restores this fallback
-  // when the provider goes away.
-  let source: () => NotifySettings = () => config
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, SETTINGS_NAMESPACE, Config, config, {
-      setSource: (current) => { source = current },
-      onChange: () => {},
-      validate: (value) => { resolveSettings(value) },
-    })
-    installPreview(ctx, settingsCtx.settings)
-  })
+  resolveSettings(settingsOf(config))
 
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (event.type !== 'turn/end') return
-    const settings = resolveSettings(source())
+    const settings = resolveSettings(settingsOf(config))
     if (!settings.notifyOnTurnEnd) return
     if (settings.topLevelOnly && isDelegated(session)) return
     const key = soundKeyOf(event.data.reason)
@@ -313,39 +354,71 @@ export function apply(ctx: Context, config: Config): void {
     notify(ctx, settings.sounds[key], renderNotice(settings.messages[key], values))
   })
 
-  ctx.on('approval/request', (req: ApprovalRequest, next) => {
-    const settings = resolveSettings(source())
+  ctx.on('approval/request', (req: ApprovalRequestEvent, next) => {
+    const settings = resolveSettings(settingsOf(config))
     if (settings.notifyOnApproval && !(settings.topLevelOnly && isDelegated(req.agent.session))) {
       notify(ctx, settings.sounds.approval, renderNotice(settings.messages.approval, approvalValues(req)))
     }
     return next()
   })
+
+  // The custom page owns this entry's form, so the automatic schema page is
+  // suppressed. The child names the plugin fiber the policy belongs to, and a
+  // late-loading or replaced Settings service picks the policy up.
+  let settings: Context['settings'] | undefined
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.effect(
+      () => settingsCtx.settings.configure({ auto: false }, ctx.fiber),
+      'macos-notify: settings page policy',
+    )
+    settingsCtx.effect(() => {
+      settings = settingsCtx.settings
+      return () => {
+        if (settings === settingsCtx.settings) settings = undefined
+      }
+    }, 'macos-notify: preview writer')
+  })
+  // Registered on the plugin fiber, not the inject child: the Loader emits the
+  // event filtered to the entry's own fiber. One listener is enough across a
+  // Settings service replacement, because the closure reads the live service.
+  installPreview(ctx, config, () => settings)
 }
 
 /**
- * Wire the preview namespace: the settings page writes one request there, the
- * Host fires that banner, then drops the request again.
+ * Wire the preview request: the settings page writes one request into the
+ * plugin's own entry, the Host fires that banner, then drops the request
+ * again.
  *
- * The document is durable and a preview is not configuration, so a fired
- * request is cleared rather than left in `settings.yaml`. The clear is
- * skipped when a newer request already replaced the one that fired, and the
- * nonce carried by each request is what makes "newer" decidable.
+ * A package outside the web assembly's generated Remote namespaces reaches
+ * the Host only through its configuration document, so the request rides the
+ * entry's `preview` volatile field. The document is durable and a preview is
+ * not configuration, so a fired request is cleared rather than left in the
+ * profile patch. The clear is skipped when a newer request already replaced
+ * the one that fired, and the nonce carried by each request is what makes
+ * "newer" decidable.
  * @param ctx - the plugin context whose subprocess seam runs the banner.
- * @param settings - the settings service holding the preview namespace.
+ * @param config - the plugin's live configuration references.
+ * @param current - the Settings service currently injected, when one is.
  */
-function installPreview(ctx: Context, settings: SettingsProvider): void {
-  const previews = settings.register(PREVIEW_NAMESPACE, PreviewConfig)
+function installPreview(
+  ctx: Context,
+  config: Config,
+  current: () => Context['settings'] | undefined,
+): void {
   // A request left over from an earlier run must not fire at this boot.
-  let fired = previews.get().nonce
-  previews.watch((request) => {
+  let fired = config.preview.get().nonce
+  ctx.on('loader/volatile-update', () => {
+    const request = config.preview.get()
     if (!isSoundKey(request.op) || request.nonce === 0 || request.nonce === fired) return
     fired = request.nonce
     notify(ctx, isSoundName(request.sound) ? request.sound : DEFAULT_SOUNDS[request.op], {
       title: truncate(request.title),
       message: truncate(request.message),
     })
-    if (previews.get().nonce !== request.nonce) return
-    void settings.replace(PREVIEW_NAMESPACE, {}).catch((error: unknown) => {
+    const settings = current()
+    const entryId = ctx.fiber.entry?.options.id
+    if (settings === undefined || entryId === undefined || config.preview.get().nonce !== request.nonce) return
+    void settings.mutate(entryId, [{ op: 'unset', path: ['preview'] }]).catch((error: unknown) => {
       ctx.logger.warn(`macos-notify: could not clear the preview request: ${error}`)
     })
   })

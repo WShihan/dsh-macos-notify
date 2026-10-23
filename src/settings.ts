@@ -10,15 +10,6 @@
 export const SETTINGS_NAMESPACE = 'macos-notify'
 
 /**
- * Settings namespace carrying one banner preview request. The page writes it,
- * the Host fires the banner and clears it again. A plugin's browser half
- * reaches the Host only through the generated remote namespaces, and this
- * package ships outside that assembly, so the settings document is the one
- * channel both halves already share.
- */
-export const PREVIEW_NAMESPACE = 'macos-notify-preview'
-
-/**
  * Alert sounds every macOS release ships in `/System/Library/Sounds`. The
  * names are Apple's, passed verbatim to AppleScript `sound name`.
  */
