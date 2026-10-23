@@ -314,7 +314,19 @@ export class NotificationsController {
     }
     this.testing = key
     this.run(
-      () => this.scope.set('preview', request),
+      async () => {
+        const accepted = await this.scope.set('preview', request)
+        // The Host fires the banner while it commits that write. Clearing the
+        // field afterwards keeps it out of the profile; a crash in between
+        // leaves a request the Host skips at its next activation. The clear
+        // cannot ride the same commit from the Host side: the Loader's
+        // volatile-update listener runs inside the HMR transaction, and
+        // ConfigEditor refuses a nested write.
+        if (accepted) {
+          try { await this.scope.unset('preview') } catch { /* the request is harmless */ }
+        }
+        return accepted
+      },
       { onSettle: () => { this.testing = undefined } },
     )
   }

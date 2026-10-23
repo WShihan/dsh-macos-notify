@@ -365,46 +365,29 @@ export function apply(ctx: Context, config: Config): void {
   // The custom page owns this entry's form, so the automatic schema page is
   // suppressed. The child names the plugin fiber the policy belongs to, and a
   // late-loading or replaced Settings service picks the policy up.
-  let settings: Context['settings'] | undefined
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.effect(
       () => settingsCtx.settings.configure({ auto: false }, ctx.fiber),
       'macos-notify: settings page policy',
     )
-    settingsCtx.effect(() => {
-      settings = settingsCtx.settings
-      return () => {
-        if (settings === settingsCtx.settings) settings = undefined
-      }
-    }, 'macos-notify: preview writer')
   })
-  // Registered on the plugin fiber, not the inject child: the Loader emits the
-  // event filtered to the entry's own fiber. One listener is enough across a
-  // Settings service replacement, because the closure reads the live service.
-  installPreview(ctx, config, () => settings)
+  installPreview(ctx, config)
 }
 
 /**
- * Wire the preview request: the settings page writes one request into the
- * plugin's own entry, the Host fires that banner, then drops the request
- * again.
+ * Fire the banner a settings-page preview request asks for.
  *
  * A package outside the web assembly's generated Remote namespaces reaches
- * the Host only through its configuration document, so the request rides the
- * entry's `preview` volatile field. The document is durable and a preview is
- * not configuration, so a fired request is cleared rather than left in the
- * profile patch. The clear is skipped when a newer request already replaced
- * the one that fired, and the nonce carried by each request is what makes
- * "newer" decidable.
+ * the Host only through its configuration document, so a preview rides the
+ * entry's `preview` volatile field. The page clears the field again after its
+ * write settles: this listener runs inside the Loader's HMR transaction, and
+ * a write back from here would be refused as a nested transaction. A request
+ * left in the document by a crash is harmless — the first nonce seen at
+ * activation is recorded, so it never fires at boot.
  * @param ctx - the plugin context whose subprocess seam runs the banner.
  * @param config - the plugin's live configuration references.
- * @param current - the Settings service currently injected, when one is.
  */
-function installPreview(
-  ctx: Context,
-  config: Config,
-  current: () => Context['settings'] | undefined,
-): void {
+function installPreview(ctx: Context, config: Config): void {
   // A request left over from an earlier run must not fire at this boot.
   let fired = config.preview.get().nonce
   ctx.on('loader/volatile-update', () => {
@@ -414,12 +397,6 @@ function installPreview(
     notify(ctx, isSoundName(request.sound) ? request.sound : DEFAULT_SOUNDS[request.op], {
       title: truncate(request.title),
       message: truncate(request.message),
-    })
-    const settings = current()
-    const entryId = ctx.fiber.entry?.options.id
-    if (settings === undefined || entryId === undefined || config.preview.get().nonce !== request.nonce) return
-    void settings.mutate(entryId, [{ op: 'unset', path: ['preview'] }]).catch((error: unknown) => {
-      ctx.logger.warn(`macos-notify: could not clear the preview request: ${error}`)
     })
   })
 }

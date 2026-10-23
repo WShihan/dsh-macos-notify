@@ -48,23 +48,15 @@ class RecordingSubprocess extends Service {
   }
 }
 
-/** One recorded settings mutation. */
-interface RecordedMutation {
-  readonly ns: string
-  readonly ops: readonly { readonly op: string; readonly path: readonly string[]; readonly value?: unknown }[]
-}
-
 /**
- * A `ctx.settings` stand-in: `configure` records the page policy, and `mutate`
- * records the Host's clearing write for a fired preview.
+ * A `ctx.settings` stand-in that records the page policy. The preview clear is
+ * the page's write, so the Host half never calls this service's `mutate`.
  */
 class RecordingSettings extends Service {
   static configured: { auto?: boolean } | undefined
-  static mutations: RecordedMutation[] = []
 
   static reset(): void {
     RecordingSettings.configured = undefined
-    RecordingSettings.mutations = []
   }
 
   constructor(ctx: Context) {
@@ -74,11 +66,6 @@ class RecordingSettings extends Service {
   configure(presentation: { auto?: boolean }): () => void {
     RecordingSettings.configured = presentation
     return () => {}
-  }
-
-  mutate(ns: string, ops: RecordedMutation['ops']): Promise<boolean> {
-    RecordingSettings.mutations.push({ ns, ops })
-    return Promise.resolve(true)
   }
 }
 
@@ -487,24 +474,14 @@ describe('macos-notify settings integration', () => {
 })
 
 describe('macos-notify preview requests', () => {
-  it('fires the requested banner and clears the request', async () => {
-    const ctx = await createContext()
-    const fiber = await mountConfig(ctx, current)
-    // The Host reaches the page's request through its own Loader entry id.
-    Object.defineProperty(fiber, 'entry', {
-      configurable: true,
-      value: { options: { id: 'macos-notify' } },
-    })
+  it('fires the requested banner', async () => {
+    const ctx = await setup()
     firePreview(ctx, {
       op: 'error', nonce: 1, sound: 'Hero', title: '任务失败', message: '第 1 轮失败：boom',
     })
 
     expect(RecordingSubprocess.specs).toHaveLength(1)
     expect(lastScript()).toBe('display notification "第 1 轮失败：boom" with title "任务失败" sound name "Hero"')
-    expect(RecordingSettings.mutations).toEqual([{
-      ns: 'macos-notify',
-      ops: [{ op: 'unset', path: ['preview'] }],
-    }])
   })
 
   it('ignores a repeat of the request it already fired', async () => {

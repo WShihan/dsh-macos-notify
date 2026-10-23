@@ -138,6 +138,8 @@ DSH 0.2.1 removed the separate settings document: the page now edits the `config
 
 The old `macos-notify-preview` section was only that era's preview channel; ignore it. `engines.dsh` refuses runtimes before 0.2.1, so upgrading DSH requires upgrading this plugin too.
 
+The settings page writes the profile's `cordis.patch.yml`, not the plugin package: upgrading this plugin with `dsh plugin update` or another `add` never touches the migrated configuration. Only resetting the profile (for example with `--from-default-profile`) clears it; paste the `- id: macos-notify` block back in that case.
+
 ## Settings page
 
 With this plugin mounted and a settings service composed (`@deepseek-ai/dsh-settings`, which ships in `@deepseek-ai/dsh-base`), the settings panel gains a **Notifications** page of its own, listed in the navigation after General, Models, Plugins, and Agent presets:

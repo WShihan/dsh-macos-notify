@@ -139,6 +139,8 @@ DSH 0.2.1 取消了独立的设置文档：设置页现在直接编辑 profile �
 
 旧的 `macos-notify-preview` 一节只是当时的预览通道，直接忽略。`engines.dsh` 会拒绝 0.2.1 之前的运行时，因此升级 DSH 后必须同时升级本插件。
 
+设置页写入的是 profile 的 `cordis.patch.yml`，与插件包本身无关：之后用 `dsh plugin update` / 重新 `add` 升级本插件，都不会改动你迁移进去的旧配置。只有重置 profile（例如 `--from-default-profile`）才会清掉它；届时把上面的 `- id: macos-notify` 块重新贴回去即可。
+
 ## 设置页
 
 在插件已挂载、并且组合了设置服务（`@deepseek-ai/dsh-settings`，随 `@deepseek-ai/dsh-base` 一起提供）时，设置面板会多出一个独立的 **通知** 页，在导航里排在通用、模型、插件、Agent 预设之后：

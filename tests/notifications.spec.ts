@@ -86,9 +86,10 @@ function controllerOf(scope: FakeForm): NotificationsController {
   )
 }
 
-/** The preview request the controller wrote, if any. */
+/** The preview request the controller wrote, before it cleared the field. */
 function previewPayload(scope: FakeForm): Record<string, unknown> {
-  const write = [...scope.writes].reverse().find(candidate => candidate.path.join('.') === 'preview')
+  const write = [...scope.writes].reverse().find(candidate =>
+    candidate.op === 'set' && candidate.path.join('.') === 'preview')
   return (write?.value ?? {}) as Record<string, unknown>
 }
 
@@ -269,6 +270,7 @@ describe('macos-notify notifications page controller', () => {
       message: 'shell needs run a command',
     })
     expect(previewPayload(scope)['nonce']).toBeGreaterThan(0)
+    expect(scope.writes.slice(-1)).toEqual([{ op: 'unset', path: ['preview'] }])
   })
 
   it('previews the staged text, not what is stored', async () => {
